@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title></title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html {
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 10px;
+      color: #4d4d4d;
+    }
+
+    .container {
+      width: 100%;
+      display: flex;
+      justify-content: space-evenly
+    }
+
+    .chart-container {
+      width: 48%;
+    }
+
+    .tooltip {
+      position: fixed;
+      padding: 0.75em 1em;
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 0.75em;
+      border: 1px solid #2E7EBB;
+      pointer-events: none;
+      opacity: 0;
+    }
+  </style>
+  <script src="https://d3js.org/d3.v5.min.js"></script>
+  <script src="https://d3js.org/topojson.v2.min.js"></script>
+</head>
+
+<body>
+  <div class="container">
+    <div class="chart-container" id="choropleth-chart">
+      <div class="chart-title">
+        <h2>Damage Type: <span class="chart-title-value">All</span></h2>
+      </div>
+      <div class="chart-chart"></div>
+    </div>
+    <div class="chart-container" id="bar-chart">
+      <div class="chart-title">
+        <h2>State: <span class="chart-title-value">All</span></h2>
+      </div>
+      <div class="chart-chart"></div>
+    </div>
+    <div class="tooltip"></div>
+  </div>
+  <script>
+    ////////////////////////////////////////////////////////////
+    //// Process Data //////////////////////////////////////////
+    ////////////////////////////////////////////////////////////
+    Promise.all([
+      d3.csv("https://raw.githubusercontent.com/Sbarj130917/Visual_Analytics-D3.js/master/losses2015_transformed.csv"),
+      d3.json("https://raw.githubusercontent.com/Sbarj130917/Visual_Analytics-D3.js/master/us-10m.json")
+    ]).then(([dataCSV, us]) => {
+      dataCSV.forEach(d => {
+        d.Amount = +d.Amount;
+      });
+
+      // Data for choropleth chart
+      const stateCodeToStateAbv = d3.nest()
+        .key(d => d.State_Code)
+        .rollup(v => v[0].State_Abv)
+        .map(dataCSV);
+
+      const totalLossByState = d3.nest()
+        .key(d => d.State_Abv)
+        .rollup(v => d3.sum(v, d => d.Amount))
+        .map(dataCSV);
+      const lossByStateByDamage = d3.nest()
+        .key(d => d.State_Abv)
+        .key(d => d.Damage_Descp)
+        .rollup(v => v[0])
+        .map(dataCSV);
+      lossByStateByDamage.each((lossByDamage, stateAbv) => {
+        lossByDamage.set("All", { State_Abv: stateAbv, Damage_Descp: "All", Amount: totalLossByState.get(stateAbv) })
+      });
+      const lossByDamage = d3.nest()
+        .key(d => d.Damage_Descp)
+        .map(dataCSV);
+      lossByDamage.set("All", totalLossByState.entries().map((d) => ({ State_Abv: d.key, Amount: d.value })));
+
+      // Data for bar chart
+      const totalLossByDamage = d3.nest()
+        .key(d => d.Damage_Descp)
+        .rollup(v => ({ Damage_Descp: v[0].Damage_Descp, Amount: d3.sum(v, d => d.Amount) }))
+        .map(dataCSV);
+      const lossByState = d3.nest()
+        .key(d => d.State_Abv)
+        .map(dataCSV);
+      lossByState.set("All", totalLossByDamage.values());
+      lossByState.each(damages => {
+        damages.sort((a, b) => d3.ascending(a.Amount, b.Amount))
+      });
+
+      ////////////////////////////////////////////////////////////
+      //// Initial Setup /////////////////////////////////////////
+      ////////////////////////////////////////////////////////////
+      // Containers
+      const choroplethChartContainer = d3.select("#choropleth-chart");
+      const choroplethChartTitle = choroplethChartContainer.select(".chart-title-value");
+      const choroplethChartChart = choroplethChartContainer.select(".chart-chart");
+
+      const barChartContainer = d3.select("#bar-chart");
+      const barChartTitle = barChartContainer.select(".chart-title-value");
+      const barChartChart = barChartContainer.select(".chart-chart");
+
+      const tooltip = d3.select(".tooltip");
+
+      // Dimensions
+      const chartWidth = choroplethChartChart.node().clientWidth;
+      const chartHeight = chartWidth;
+
+      // Chart
+      let choroplethChart;
+      let barChart;
+
+      ////////////////////////////////////////////////////////////
+      //// Choropleth ////////////////////////////////////////////
+      ////////////////////////////////////////////////////////////
+      choroplethChart = renderChoroplethChart(choroplethChartChart, chartWidth, chartHeight);
+
+      function renderChoroplethChart(container, containerWidth, containerHeight) {
+        const width = containerWidth;
+        const height = containerHeight;
+
+        const states = topojson.feature(us, us.objects.states);
+
+        const projection = d3.geoAlbersUsa()
+          .fitSize([width, height], states);
+        const path = d3.geoPath().projection(projection);
+
+        const colorScale = d3
+          .scaleSequential(d3.interpolateBlues);
+
+        const svg = container.append("svg")
+          .attr("width", containerWidth)
+          .attr("height", containerHeight);
+
+        const statePath = svg
+          .selectAll("path")
+          .data(states.features)
+          .enter()
+          .append("path")
+          .attr("d", path)
+          .attr("stroke", "#999")
+          .attr("stroke-width", 0.5)
+          .attr("fill", "#fff")
+          .each(d => d.properties.ABV = stateCodeToStateAbv.get(d.id))
+          .on("mouseover", function (d) {
+            d3.select(this).raise().attr("stroke", "#000").attr("stroke-width", 2);
+            const stateAbv = d.properties.ABV;
+            barChartTitle.text(stateAbv);
+            barChart.update(stateAbv);
+            showChoroplethTooltip(d);
+          })
+          .on("mousemove", moveTooltip)
+          .on("mouseout", function () {
+            d3.select(this).attr("stroke", "#999").attr("stroke-width", 0.5);
+            const stateAbv = "All";
+            barChartTitle.text(stateAbv);
+            barChart.update(stateAbv);
+            hideTooltip();
+          });
+
+        const chart = {};
+        chart.update = function (damageDescp) {
+          colorScale.domain([
+            0,
+            d3.max(lossByDamage.get(damageDescp), d => d.Amount) / 0.75 // Increase the max value to avoid the darkest blue color
+          ]);
+
+          statePath
+            .each(d => {
+              const stateAbv = d.properties.ABV;
+              if (stateAbv) {
+                const entry = lossByStateByDamage.get(stateAbv).get(damageDescp);
+                d.value = entry ? entry.Amount : null;
+              } else {
+                d.value = null;
+              }
+            })
+            .attr("fill", d => colorScale(d.value))
+            .style("display", d => d.value ? "block" : "none");
+        }
+        return chart;
+      }
+
+      choroplethChart.update("All");
+      ////////////////////////////////////////////////////////////
+      //// Bar ///////////////////////////////////////////////////
+      ////////////////////////////////////////////////////////////
+      barChart = renderBarChart(barChartChart, chartWidth, chartHeight);
+
+      function renderBarChart(container, containerWidth, containerHeight) {
+        const margin = { top: 10, right: 10, bottom: 30, left: 160 };
+        const width = containerWidth - margin.left - margin.right;
+        const height = containerHeight - margin.top - margin.bottom;
+
+        const x = d3
+          .scaleLinear()
+          .range([0, width]);
+
+        const y = d3
+          .scaleBand()
+          .range([0, height])
+          .paddingOuter(0.2)
+          .paddingInner(0.2);
+
+        const xAxis = d3.axisBottom()
+          .scale(x)
+          .ticks(5);
+
+        const yAxis = d3.axisLeft()
+          .scale(y);
+
+        const svg = container.append("svg")
+          .attr("width", containerWidth)
+          .attr("height", containerHeight);
+
+        const g = svg.append("g")
+          .attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const xAxisG = g.append("g")
+          .attr("transform", `translate(0,${height})`);
+
+        const yAxisG = g.append("g");
+
+        const barG = g.append("g");
+
+        const chart = {};
+        chart.update = function (stateAbv) {
+          const data = lossByState.get(stateAbv);
+
+          x.domain([
+            0,
+            data[data.length - 1].Amount
+          ]);
+          y.domain(data.map(d => d.Damage_Descp));
+
+          xAxisG.call(xAxis);
+          yAxisG.call(yAxis);
+
+          barG.selectAll("*").remove();
+          barG.selectAll("rect")
+            .data(data)
+            .enter()
+            .append("rect")
+            .attr("fill", "#2E7EBB")
+            .attr("x", 0)
+            .attr("y", d => y(d.Damage_Descp))
+            .attr("width", d => x(d.Amount))
+            .attr("height", y.bandwidth())
+            .attr("stroke", "#000")
+            .attr("stroke-width", 2)
+            .attr("stroke-opacity", 0)
+            .style("pointer-events", "all")
+            .on("mouseover", function (d) {
+              d3.select(this).attr("stroke-opacity", 1);
+              const damageDescp = d.Damage_Descp;
+              choroplethChartTitle.text(damageDescp);
+              choroplethChart.update(damageDescp);
+              showBarTooltip(d);
+            })
+            .on("mousemove", moveTooltip)
+            .on("mouseout", function () {
+              d3.select(this).attr("stroke-opacity", 0);
+              const damageDescp = "All";
+              choroplethChartTitle.text(damageDescp);
+              choroplethChart.update(damageDescp);
+              hideTooltip();
+            });
+        }
+        return chart;
+      }
+
+      barChart.update("All");
+
+      ////////////////////////////////////////////////////////////
+      //// Tooltip ///////////////////////////////////////////////
+      ////////////////////////////////////////////////////////////
+      function showChoroplethTooltip(d) {
+        const stateAbv = d.properties.ABV;
+        const amount = d.value;
+        tooltip.html(`
+          <div>State: <b>${stateAbv}</b></div>
+          <div>Amount: <b>$${d3.format(",")(amount)}</b></div>
+        `);
+        tooltip.style("opacity", 1);
+      }
+
+      function showBarTooltip(d) {
+        const damageDescp = d.Damage_Descp;
+        const amount = d.Amount;
+        tooltip.html(`
+          <div>Damage: <b>${damageDescp}</b></div>
+          <div>Amount: <b>$${d3.format(",")(amount)}</b></div>
+        `);
+        tooltip.style("opacity", 1);
+      }
+
+      function moveTooltip() {
+        const rect = tooltip.node().getBoundingClientRect();
+        tooltip
+          .style("left", d3.event.x - rect.width / 2 + "px")
+          .style("top", d3.event.y - rect.height - 5 + "px");
+      }
+
+      function hideTooltip() {
+        tooltip.style("opacity", 0);
+      }
+    });
+  </script>
+</body>
+
+</html>
